@@ -1,328 +1,272 @@
-    var cms = function ($, highlight_start_color, highlight_end_color, tinymce_init_object, filebrowser_url, buttons, tinymce_content_css, linklist_url, is_superuser, post_edit_callback) {
-	
-	
+var cms = function ($, tinymce_config, post_edit_callback) {
 	var throbberString = "<span class='throbber'>Saving...</span>",
-		currently_editing = false;
+		currently_editing = false,
+		tinymce_init_object = $.extend({
+			plugins: "paste link code lists",
+			paste_as_text: true,
+			relative_urls: false,
+			theme: "modern",
+	        menubar : false,
+			block_formats: "Header 3=h3;Header 4=h4;Header 5=h5;Header 6=h6;Quote=blockquote;Paragraph=p",
+			toolbar: "formatselect bold italic | undo redo | link | " +
+			         "blockquote bullist numlist | pastetext code",
+			height: 400,
+			width: 760,
+			link_list: cms_tinymce_linklist // created by cms.views.linklist
+		}, tinymce_config);
 	
-	
-	if (!tinymce_init_object) {
-	    tinymce_init_object = {
-			setup: function() {
-			    // hack to stop tinymce's silly alert (see paste plugin source code)
-			    var cookie = tinymce.util.Cookie;
-			    if (!cookie.get("tinymcePasteText")) {
-    			    cookie.set("tinymcePasteText", "1");
-    			}
-			},
-			setupcontent_callback: function(id) {
-			    // set plain-text paste to be on by default
-			    tinyMCE.get(id).execCommand('mcePasteText', true);
-			},
-            paste_auto_cleanup_on_paste: true,
-			//"elements: "id_raw_content",
-			language: "en",
-			directionality: "ltr",
-			theme: "advanced",
-			strict_loading_mode: 1,
-			mode: "exact",
-			height: "400px",
-			width: "760px",
-			content_css: tinymce_content_css,
-			external_link_list_url: linklist_url,
-			theme_advanced_toolbar_location: "top",
-			theme_advanced_toolbar_align: "left",
-			theme_advanced_buttons1: buttons,
-			theme_advanced_buttons2: "",
-			theme_advanced_buttons3: "",
-            theme_advanced_statusbar_location: "bottom",
-            theme_advanced_resizing: true,
-			plugins: "paste,inlinepopups",
-			relative_urls: false
-		};
-	}
-
-	
-	// filebrowser callback - only used if filebrowser_url is specified
-	function djangoFileBrowser(field_name, url, type, win) {
-        var url = filebrowser_url + "?pop=2&type=" + type;
-    
-        tinyMCE.activeEditor.windowManager.open(
-            {
-                'file': url,
-                'width': 820,
-                'height': 500,
-                'resizable': "yes",
-                'scrollbars': "yes",
-                'inline': "no",
-                'close_previous': "no"
-            },
-            {
-                'window': win,
-                'input': field_name,
-                'editor_id': tinyMCE.selectedInstance.editorId
-            }
-        );
-        return false;
-    };
-	
-	tinymce_init_object['file_browser_callback'] = djangoFileBrowser;
-	
-	
-	/*
-	$('body').css({
-		'padding-top': '30px'
+	$('.edit-switcher').click(function() {
+	    $.cookie('cms-edit_mode', null, {path: '/'});
+	    location.reload();
+	    return false;
 	});
-	*/
-	
-	//$("#cms-menu").prependTo('body');
-	//var topMenu = $("#cms-menu").clone();
-	//$('body').remove("#cms-menu");
-	//$('body').prepend(topMenu);
 	
 	function edit(block) {
-		//console.log(block, currently_editing, $(block).attr('type'));
+		var save_url = $(block).data('save_url');
 		
 		if (currently_editing) {
 			return false;
 		}
 		
-		
 		if ($(block).hasClass('placeholder')) {
 			var raw_content = '';
 		}
 		else {
-			var raw_content = $.trim($(block).find('input').val());
+			var raw_content = $.trim($(block).find('input[name="content"]').val());
 		}
 		
-		if ($(block).attr('blocktype') === 'image') {
-			$('#cms-imageform #id_image_id').val($(block).attr('image_id'));
-			$('#cms-imageform #id_redirect_to').val(window.location);
-			
-			if ($(block).find('img').length) {
-				$('#cms-imageform h2').html('Change image');
-				$('#cms-imageform div.current img').attr('src', $(block).find('img').eq(0).attr('src'));
-				$('#cms-imageform div.current').css({'visibility': 'visible'});
-			}
-			else {
-				$('#cms-imageform h2').html('Add image');
-				$('#cms-imageform div.current').css({'visibility': 'hidden'});
-			}
-			
-			showForm('image');
-		}
-		else if ($(block).attr('format') === 'html') {
-			$('#cms-htmlform #id_html-raw_content').val(raw_content).html(raw_content);
-			tinyMCE.get("id_html-raw_content").setContent(raw_content);
-			$('#cms-htmlform #id_html-block_id').val($(block).attr('block_id'));
-			$('#cms-htmlform #id_html-format').val($(block).attr('format'));
-            
-            
-			$('#cms-htmlform form').ajaxForm({
-				success: function(data) {
-					var raw_content = $.trim(data.raw_content),
-						compiled_content = $.trim(data.compiled_content);
-					$(block).find('input').val(raw_content);
-					$(block).find("span.cms-inner").html($.trim(raw_content) ? compiled_content : "Click to add text");
-					
-					if (!compiled_content) {
-						$(block).addClass("placeholder");
-					}
-					highlightBlock(block);
-					currently_editing = false;
-					if (typeof post_edit_callback === 'function') {
-					    post_edit_callback(block);
-					}
-					
-				},
-				beforeSubmit: function() {
-					$(block).removeClass("placeholder");
-					$(block).find("span.cms-inner").html(throbberString);
-					hideForm('html', false);
-				},
-				dataType: 'json',
-				data: {
-				    filters: $(block).attr('filters')
-				}
-			});
-			showForm('html');
+		if ($(block).hasClass('cms-image')) {
+		  var form = $('#cms-imageform'),
+		      image_url = $(block).data('image_url'),
+		      description = $(block).data('description');
+		      
+		  form.find('form').attr('action', save_url);
+		
+		  if (image_url) {
+		    form.find('h2').html('Change image');
+		    form.find('div.current img').attr('src', image_url);
+		    form.find('div.current').css('visibility', 'visible');
+		    form.find('input[name$="description"]').val(description);
+		  }
+		  else {
+		    form.find('h2').html('Add image');
+		    form.find('div.current').css('visibility', 'hidden');
+		  }
+		  
+		  showForm('image');
 		}
 		else {
-		    var post_edit_callbacks = [];
-            
-            $(block).parents('a').each(function(e) {
-                var me = $(this),
-                    cancel = function() {
-                        return false;
-                    };
-                me.bind('click', cancel);
-                post_edit_callbacks.push(function() {
-                    setTimeout(function() {
-                        me.unbind('click', cancel);
-                    }, 100);
-                });
-            });
-		    
-		    raw_content_escaped = raw_content.replace('<', '&lt;').replace('<', '&lt;');
-			$('#cms-textform #id_raw_content').val(raw_content).html(raw_content_escaped);
-			$('#cms-textform #id_block_id').val($(block).attr('block_id'));
-			$('#cms-textform #id_format').val($(block).attr('format'));
-			
-			var editFormContainer = $('#cms-textform').clone();
-			editFormContainer.find('textarea').css({'height': $(block).height()});
-			editFormContainer.css({'display': 'block'});
-			
-			$(block).parent().append(editFormContainer);
-			$(block).css({'display': 'none'});
-			
-			
-			
-			editFormContainer.find('textarea').focus().select();
-			
-			function hideTextForm() {
-				$(block).css({'display': 'block'});
-				editFormContainer.remove();
-				currently_editing = false;
-				$(post_edit_callbacks).each(function(i, fn) { fn(); });
-			};
-			editFormContainer.find('input.cancel').click(hideTextForm);
-			
+		    var inner = $(block).find(".cms-inner");
 
-			editFormContainer.find('form').ajaxForm({
-				success: function(data) {
-				    //console.log(arguments);
-					//return true;
-					$(block).find("span.cms-inner").html($.trim(data.raw_content) ? $.trim(data.compiled_content) : "Click to add text");
-					if (!$.trim(data.compiled_content)) {
-						$(block).addClass("placeholder");
-					}
-					highlightBlock(block);
-					currently_editing = false;
-					$(post_edit_callbacks).each(function(i, fn) { fn(); });
-					$(block).find('input').val($.trim(data.raw_content));
-					if (typeof post_edit_callback === 'function') {
-					    post_edit_callback(block);
-					}
-				},
-				beforeSubmit: function() {
-					$(block).removeClass("placeholder");
-					$(block).find("span.cms-inner").html(throbberString);
-					hideTextForm();
-				},
-				dataType: 'json',
-				data: {
-				    filters: $(block).attr('filters')
+				function update_block (content) {
+					inner.html(content || 'Click to add text');
+          $(block)[content ? 'removeClass' : 'addClass']('placeholder');
 				}
-			});
-			
-			/* manually submit the form if we're killing the click event above due to
-			   the parent being an <a> tag */
-    		if ($(block).parents('a').length) {
-        		editFormContainer.find('form input[type=submit]').click(function() {
-        		    $(this).parents('form').eq(0).submit();
-    		    });
-            }
-            
-            
-		}
 
-		
+            if ($(block).data('format') === 'html') {
+                $('#cms-htmlform #id_html-content').val(raw_content).html(raw_content);
+                tinyMCE.get("id_html-content").setContent(raw_content);
+                $('#cms-htmlform #id_format').val($(block).data('format'));
+                
+                
+                $('#cms-htmlform form').ajaxForm({
+                    url: save_url,
+                    success: function(data) {
+                        update_block(data.rendered_content);
+                        $(block).find('input[name="content"]').val(data.content);
+                        highlightBlock(block);
+                        currently_editing = false;
+                        if (typeof post_edit_callback === 'function') {
+                            post_edit_callback(block);
+                        }
+                    },
+                    beforeSubmit: function() {
+                        $(block).removeClass("placeholder");
+                        inner.html(throbberString);
+                        hideForm('html', false);
+                    },
+                    dataType: 'json'
+                });
+                showForm('html');
+            }
+            else {
+                var reset_callbacks = [];
+                
+                $(block).parents('a').each(function(e) {
+                    var me = $(this),
+                        cancel = function() {
+                            return false;
+                        };
+                    me.bind('click', cancel);
+                    reset_callbacks.push(function() {
+                        setTimeout(function() {
+                            me.unbind('click', cancel);
+                        }, 100);
+                    });
+                });
+                            
+                var editFormContainer = $('#cms-textform').clone();
+                raw_content_escaped = raw_content.replace('>', '&gt;').replace('<', '&lt;');
+                editFormContainer.find('textarea[name$="content"]').val(raw_content).html(raw_content_escaped);
+    
+                editFormContainer.show().find('textarea').css({'height': $(block).height()});
+                
+                $(block).parent().append(editFormContainer);
+                $(block).css({'display': 'none'});
+    
+                editFormContainer.find('textarea').focus().select();
+                
+                function hideTextForm() {
+                    $(block).css({'display': 'block'});
+                    editFormContainer.remove();
+                    currently_editing = false;
+                    $(reset_callbacks).each(function(i, fn) { fn(); });
+                };
+                editFormContainer.find('input.cancel').click(hideTextForm);
+                
+                
+                editFormContainer.find('form').ajaxForm({
+                    url: save_url,
+                    success: function(data) {
+                        update_block(data.rendered_content);
+                        highlightBlock(block);
+                        currently_editing = false;
+                        $(block).find('input[name="content"]').val(data.content);
+                        $(reset_callbacks).each(function(i, fn) { fn(); });
+                        if (typeof post_edit_callback === 'function') {
+                            post_edit_callback(block);
+                        }
+                    },
+                    beforeSubmit: function() {
+                        $(block).removeClass("placeholder");
+                        inner.html(throbberString);
+                        hideTextForm();
+                    },
+                    dataType: 'json'
+                });
+                
+                /* manually submit the form if we're killing the click event above due to
+                   the parent being an <a> tag */
+                if ($(block).parents('a').length) {
+                    editFormContainer.find('form input[type=submit]').click(function() {
+                        $(this).parents('form').eq(0).submit();
+                    });
+                }
+            }
+        }
 		
 		currently_editing = true;
 	};
 	
-	
-	$(function() {
-	
-		$('#id_html-raw_content').tinymce(tinymce_init_object);
+	tinyMCE.init($.extend(tinymce_init_object, {
+    	mode: 'exact',
+    	elements: 'id_html-content'
+	}));
 
-		$('.cms-form input.cancel').click(function() {
-			hideForm();
-		});
+	$('.cms-form input.cancel').click(function() {
+		hideForm();
+	});
 
-		$('.cms-image').each(function () {
-		    // if there's no image and we're cropping, size the placeholder the same as
-		    // the image so as not to break layouts.
-		    if (!$(this).find('img').length && $(this).attr('constraint')) {
-				var bits = $(this).attr('constraint').split('x');
-                $(this).css({
-                    width: bits[0] ? bits[0] + 'px' : 'auto',
-                    height: bits[1] ? bits[1] + 'px' : 'auto',
-                    lineHeight: bits[2] + 'px',
-                    display: 'inline-block'
-                });
-			}
-		});
-		$('.cms-block, .cms-image').each(function() {
-			$(this).append('<span class="editMarker"></span>');
-		}).mouseover(function() {
-			if (!currently_editing) {
-				$(this).addClass('hovered').find('span.editMarker').css({'display': 'block'});
-			}
-		}).mouseout(function() {
-			$(this).removeClass('hovered').find('span.editMarker').css({'display': 'none'});
-		}).click(function(e){
-		    if (!e.originalTarget || e.originalTarget.tagName.toLowerCase() != 'a') {
-    			edit(this);
-	    		return false;
-		    }
-		}).find('span.editMarker').click(function(){
-			edit(this.parentNode);
-			return false;
-		});
-		
-		$('#cms-menu .page-options').click(function() {
-    		showForm('page');
-    		return false;
-	    });	
-		$('#cms-menu .new-page').click(function() {
-    		showForm('newpage');
-	        return false;
-	    });
+	$('.cms-image').each(function () {
+	    // img could be any element, not necessarily <img>
+	    var el = $(this).find('.cms-inner').children();
+	
+	    // if there's no image and we're cropping, size the placeholder the same as
+	    // the image so as not to break layouts.
+	    if (!el.length && $(this).attr('constraint')) {
+	        var bits = $(this).attr('constraint').split('x');
+	        $(this).css({
+	            width: bits[0] ? bits[0] + 'px' : 'auto',
+	            height: bits[1] ? bits[1] + 'px' : 'auto',
+	            lineHeight: bits[2] + 'px',
+	            display: 'inline-block'
+	        });
+	    }
 	    
-	    $('#cms-pageform form, #cms-newpageform form').ajaxForm({
-            'success': function(data, status, form) {
-                var wrap = $(form).find('.wrap').eq(0);
-                wrap.find('.error').remove();
-                wrap.find('p').removeClass('haserrors');
-                wrap.find('.message').remove();
-                
-                if (data.success) {
-                    wrap.append($('<div>').addClass('message').html(data.message || 'Page saved'));
-                    setTimeout(function() {
-                        window.location = data.url;
-                    }, 300);
-                }
-                else {
-                    var input;
-                    for (key in data.errors) {
-                        input = wrap.find('*[id$=' + key + ']');
-                        input.parent().addClass('haserrors').prepend($('<span>' + data.errors[key] + '</span>').addClass('error'));
-                    }
-                }
-            },
-            'beforeSubmit': function(data, status, form) {
-                var wrap = $(form).find('.wrap').eq(0);
-                wrap.find('.message').remove();
-                wrap.append($('<div>').addClass('message').html('Page saved'));
-            },
-            'dataType': 'json'
-        });
-        
-        $('#cms-imageform form').submit(function() {
-            $(this).find('.wrap').append($('<div>').addClass('message').html('Saving...'));
-        });
-	    
-		
+	    // match the display css prop for the same reason
+	    $(this).css('display', el.css('display') || 'inline-block');
 	});
 	
+	$('.cms-block, .cms-image').each(function() {
+        var me = $(this);
+	    me.hover(function() {
+    	    me.addClass('hovered');
+	    }, function() {
+    	    me.removeClass('hovered');
+	    });
+	    me.click(function(e) {
+            if (!e.originalTarget || e.originalTarget.tagName.toLowerCase() != 'a') {
+                edit(me[0]);
+                return false;
+            }
+	    });
+	});
+	
+	$('#cms-menu .page-options').click(function() {
+    	showForm('page');
+    	return false;
+	});	
+	$('#cms-menu .new-page').click(function() {
+    	showForm('newpage');
+	    return false;
+	});
+	
+	$('#cms-pageform form, #cms-newpageform form').ajaxForm({
+        'success': function(data, status, form) {
+            var wrap = $(form).find('.wrap').eq(0);
+            wrap.find('.error').remove();
+            wrap.find('p').removeClass('haserrors');
+            wrap.find('.message').remove();
+            
+            if (data.success) {
+                wrap.append($('<div>').addClass('message').html(data.message || 'Page saved'));
+                setTimeout(function() {
+                    window.location = data.url;
+                }, 300);
+            }
+            else {
+                var input;
+                for (key in data.errors) {
+                    input = wrap.find('*[id$=' + key + ']');
+                    input.parent().addClass('haserrors').prepend($('<span>' + data.errors[key] + '</span>').addClass('error'));
+                }
+            }
+        },
+        'beforeSubmit': function(data, status, form) {
+            var wrap = $(form).find('.wrap').eq(0);
+            wrap.find('.message').remove();
+            wrap.append($('<div>').addClass('message').html('Page saved'));
+        },
+        'dataType': 'json'
+    });
+    
+    $('#cms-imageform form').submit(function() {
+        $(this).find('.wrap').append($('<div>').addClass('message').html('Saving...'));
+    });
+	
 	function highlightBlock(block) {
-		$(block).css({backgroundColor: (highlight_start_color || "#ff0")}).animate({backgroundColor: (highlight_end_color || "#fff")}, 500, function() {
-			$(block).css({backgroundColor: ("")});	
-		});
+		$(block).addClass('cms-highlight');
+		
+		setTimeout(function() {
+            $(block).addClass('cms-highlight-animate');
+            $(block).removeClass('cms-highlight');
+        }, 200);
+        setTimeout(function() {
+            $(block).removeClass('cms-highlight-animate');
+		}, 700);
 	};
 
 	function showForm(which) {
-	     $('#cms-' + which + 'overlay').stop().css({opacity: 0, display: 'block'}).animate({opacity: 1}, 300)[0].visible = true;
+		var overlay = $('#cms-' + which + 'overlay'),
+			form = overlay.children('.cms-form');
+		overlay.stop().css({
+			opacity: 0,
+			display: 'block'
+		}).animate({opacity: 1}, 300)[0].visible = true;
+		var margin = (overlay.height() - form.outerHeight()) / 2;
+		form.css({
+			marginTop: Math.max(20, margin) + 'px'
+		});
 	};
 	function hideForm(which, animate) {
 	    if (which) {
@@ -348,6 +292,6 @@
 	};
 
 
-}; //init done inline so settings can be passed in - see templates/editor.html
+}; // init done inline so settings can be passed in - see templates/cms/cms/editor.js
 
 

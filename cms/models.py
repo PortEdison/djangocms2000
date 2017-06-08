@@ -1,319 +1,244 @@
-import re, os, sys, datetime
+import re
+import os
 
 from django.db import models
 from django.conf import settings
 from django.contrib.sites.models import Site
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.contenttypes import generic
-from django.template.loader import get_template
-from django import template
-from django.utils.encoding import force_unicode
-from django.utils.html import escape, strip_tags
-from django.utils.text import truncate_words
-from django.db.models.signals import class_prepared, post_save, pre_save
-from django.utils.functional import curry
-from django.template import defaultfilters
+from django.core.cache import cache
+from django.core.exceptions import ValidationError
+from django.utils.safestring import mark_safe
+from django.utils.encoding import python_2_unicode_compatible
+from django.db.models.signals import post_save
 
-import markdown2, gfm
-
-from fields import ConstrainedImageField
-import settings as cms_settings
-from decorators import cached
+from . import settings as cms_settings
+from .utils import generate_cache_key, ctype_from_key, key_from_obj
 
 
-try:
-    from audit import AuditTrail
-except ImportError:
-    class AuditTrail(object):
-        def __init__(*args, **kwargs):
-            pass
+@python_2_unicode_compatible
+class ContentModel(models.Model):
+    class Meta:
+        abstract = True
+        unique_together = ('content_type', 'object_id', 'label')
 
-"""
-from django.db.models.signals import post_init
-from django.utils.functional import curry
-"""
+    content_type = models.CharField(max_length=190)
+    object_id = models.PositiveIntegerField()
+    label = models.CharField(max_length=100)
 
-BLOCK_TYPE_CHOICES = (
-    ('plain', 'Plain text'),
-    ('markdown', 'Markdown'),
-    ('html', 'HTML'),
+    @property
+    def content_object(self):
+        ctype = ctype_from_key(self.content_type)
+        return ctype.model_class().objects.get(pk=self.object_id)
+
+    def __str__(self):
+        return self.label
+
+
+ATTR_REPLACE_CHARS = (
+    ('"', '&quot;'),
+    ("'", '&#39;'),
 )
 
-class Block(models.Model):
-    content_type = models.ForeignKey(ContentType)
-    object_id = models.PositiveIntegerField()
-    content_object = generic.GenericForeignKey('content_type', 'object_id')
 
-    
-    #page = models.ForeignKey(Page)
-    label = models.CharField(max_length=255)
-    format = models.CharField(max_length=10, choices=BLOCK_TYPE_CHOICES, default='', blank=False)
-    raw_content = models.TextField("Content", blank=True, )
-    compiled_content = models.TextField(blank=True, editable=False)
-    
+class Block(ContentModel):
+    FORMAT_ATTR = 'attr'
+    FORMAT_PLAIN = 'plain'
+    FORMAT_HTML = 'html'
+    FORMAT_CHOICES = (
+        (FORMAT_ATTR, 'Attribute'),
+        (FORMAT_PLAIN, 'Plain text'),
+        (FORMAT_HTML, 'HTML'),
+    )
+    language = models.CharField(max_length=10, choices=cms_settings.LANGUAGES,
+                                default=settings.LANGUAGE_CODE)
+    format = models.CharField(max_length=10, choices=FORMAT_CHOICES,
+                              default=FORMAT_PLAIN)
+    content = models.TextField(blank=True, default='')
 
-    history = AuditTrail(show_in_admin=False)
-    
-    def label_display(self):
-        return self.label.replace('-', ' ').replace('_', ' ').capitalize()
-    label_display.short_description = 'label'
-    label_display.admin_order_field = 'label'
-    
-    def content_display(self):
-        return truncate_words(strip_tags(self.compiled_content), 10)
-    
-    def __unicode__(self):
-        return self.label
-        #return "'%s' on %s" % (self.label, self.page.url)
-    
-    def save(self, *args, **kwargs):
-        if self.format == 'markdown':
-            if self.raw_content.strip():
-                self.compiled_content = markdown2.markdown(gfm.gfm(force_unicode((self.raw_content)))).strip()
-            else:
-                self.compiled_content = ''
+    class Meta:
+        unique_together = ('content_type', 'object_id', 'language', 'label')
+
+    def display_content(self):
+        '''Returns content, marked safe if necessary'''
+        if self.format == self.FORMAT_HTML:
+            return mark_safe(self.content)
+        elif self.format == self.FORMAT_ATTR:
+            content = self.content
+            for replacement in ATTR_REPLACE_CHARS:
+                content.replace(*replacement)
+            return content
         else:
-            self.compiled_content = self.raw_content
-        super(Block, self).save(*args, **kwargs)    
-    
-    def get_filtered_content(self, filters=None):
-        content = self.compiled_content
-        non_default_filters = []
-        if filters:
-            for f in filters:
-                if hasattr(defaultfilters, f):
-                    content = getattr(defaultfilters, f)(content)
-                else:
-                    non_default_filters.append(f)
-                
-        for f, shortname, default in cms_settings.FILTERS:
-            if (shortname in non_default_filters) or (not filters and default):
-                try:
-                    module = __import__(f)
-                    content = sys.modules[f].filter(content, self)
-                except ImportError:
-                    bits = f.split(".")
-                    module = __import__(".".join(bits[0:-1]), fromlist=[bits[-1]])
-                    fn = getattr(module, bits[-1])
-                    content = fn(content, self)
-        return content
-        
-    
-    class Meta:
-       ordering = ['id',]
-       unique_together = ('content_type', 'object_id', 'label')
-    
+            return self.content
 
-class Image(models.Model):
-    content_type = models.ForeignKey(ContentType)
-    object_id = models.PositiveIntegerField()
-    content_object = generic.GenericForeignKey('content_type', 'object_id')
 
-    history = AuditTrail(show_in_admin=False)
+class Image(ContentModel):
+    # placeholder value since images are not language-aware
+    language = settings.LANGUAGE_CODE
 
-    def label_display(self):
-        return self.label.replace('-', ' ').replace('_', ' ').title()
-    
-    
-    #page = models.ForeignKey(Page)
-    label = models.CharField(max_length=255)
-    file = ConstrainedImageField(upload_to=cms_settings.UPLOAD_PATH, blank=True, max_dimensions=cms_settings.MAX_IMAGE_DIMENSIONS)
+    file = models.ImageField(upload_to=cms_settings.UPLOAD_PATH, blank=True)
     description = models.CharField(max_length=255, blank=True)
-    def __unicode__(self):
-        return self.label
- 
- 
-    # these can be expensive for large images so cache 'em
-    def dimensions(self):
-        key = '-'.join((cms_settings.CACHE_PREFIX, 'image_dimensions', self.file.url))
-        @cached(key, 3600)
-        def _work():
-            return {
-                'width': self.file.width,
-                'height': self.file.height,
-            }
-        return _work()
-    
-    class Meta:
-       unique_together = ('content_type', 'object_id', 'label')
-    
 
 
-TEMPLATE_DIR = settings.TEMPLATE_DIRS[0]
+def clear_cache(sender, instance, **kwargs):
+    """Clear the cache of blocks/images for an object, when any of them
+       changes. """
 
-def get_templates_from_dir(dir, exclude=None):
+    key = generate_cache_key(sender, related_object=instance.content_object)
+    cache.delete(key)
+post_save.connect(clear_cache, sender=Block)
+post_save.connect(clear_cache, sender=Image)
+
+
+def get_templates_from_dir(dirname, exclude=None):
     TEMPLATE_REGEX = re.compile('\.html$')
     templates = []
-    for root, dirs, files in os.walk("%s/%s" % (TEMPLATE_DIR, dir)):
-        for file in files:
-            path = ("%s/%s" % (root.replace(TEMPLATE_DIR, ''), file)).strip('/')
-            filename = path.replace(dir, '').strip('/')
-            if TEMPLATE_REGEX.search(path) and (not exclude or not exclude.search(filename)):
-                templates.append((path, filename))
-    
+    for template_dir in cms_settings.TEMPLATE_DIRS:
+        template_path = os.path.join(template_dir, dirname)
+        for root, dirs, files in os.walk(template_path):
+            for file in files:
+                rel_root = root.replace(template_dir, '')
+                path = os.path.join(rel_root, file).strip('/')
+                filename = path.replace(dirname, '').strip('/')
+                if TEMPLATE_REGEX.search(path) and \
+                   (not exclude or not exclude.search(filename)):
+                    templates.append((path, filename))
+
     return templates
 
-def template_choices():
-    CMS_EXCLUDE_REGEX = re.compile('base\.html$|^cms/|\.inc\.html$')
-    return [('', '---------')] + get_templates_from_dir("cms", CMS_EXCLUDE_REGEX)
 
-    #OTHER_EXCLUDE_REGEX = re.compile('(?:^404\.html|^500\.html|^base\.html|^admin|^cms/|base\.html$)')
-#    return (
-#        ('', '---------'),
-#        ('Static Templates', get_templates_from_dir("cms", CMS_EXCLUDE_REGEX)),
-#        ('Other Templates', get_templates_from_dir("", OTHER_EXCLUDE_REGEX)),
-#    )
-    
+def template_choices():
+    EXCLUDE_RE = re.compile('base\.html|^cms/')
+    return [('', '---------')] + get_templates_from_dir("cms", EXCLUDE_RE)
+
 
 def get_child_pages(parent_url, qs=None):
-    return (qs or Page.live).filter(url__iregex=r'^' + parent_url + '[^/]+/$')
-    #return (qs or Page.objects).filter(url__iregex=r'^' + parent_url + '.+$')
+    if not parent_url.endswith('/'):
+        parent_url += '/'
+    if not qs:
+        qs = Page.objects.live()
+    return qs.filter(url__iregex=r'^' + parent_url + '[^/]+/?$')
 
 
 class _CMSAbstractBaseModel(models.Model):
     class Meta:
         abstract = True
 
-    blocks = generic.GenericRelation(Block)
-    images = generic.GenericRelation(Image)
-        
-    def get_title(self):
-        try:
-            return strip_tags(self.blocks.get(label="title").compiled_content)
-        except Block.DoesNotExist:
-            try:
-                return strip_tags(self.blocks.get(label="name").compiled_content)
-            except Block.DoesNotExist:
-                return self.url
+    # blocks = GenericRelation(Block)
+    # images = GenericRelation(Image)
+
+    def get_blocks(self):
+        return Block.objects.filter(content_type=key_from_obj(self),
+                                    object_id=self.id)
+
+    def get_images(self):
+        return Image.objects.filter(content_type=key_from_obj(self),
+                                    object_id=self.id)
 
 
 class PageManager(models.Manager):
     def get_for_url(self, url):
-        return Page.objects.get_or_create(url=url, site_id=settings.SITE_ID)[0]
+        try:
+            return self.get(sites__site_id=settings.SITE_ID, url=url)
+        except Page.DoesNotExist:
+            page = Page(url=url)
+            page.save()
+            PageSite.objects.create(page=page, site_id=settings.SITE_ID)
+            # page.sites.add(Site.objects.get_current())
+            page.save()
+            return page
+
+    def live(self):
+        return self.filter(is_live=True)
 
 
-class LivePageManager(models.Manager):
-    def get_query_set(self):
-        return super(LivePageManager, self).get_query_set().filter(is_live=True)
-
-
-
+@python_2_unicode_compatible
 class Page(_CMSAbstractBaseModel):
-    url = models.CharField(max_length=255, verbose_name='URL', help_text='e.g. "/about/contact/"')
+    url = models.CharField(max_length=255, verbose_name='URL',
+                           help_text='e.g. /about/contact', db_index=True)
     template = models.CharField(max_length=255, default='')
-    site = models.ForeignKey(Site, default=1)
+    # sites = models.ManyToManyField(Site, default=[settings.SITE_ID])
     creation_date = models.DateTimeField(auto_now_add=True)
-    is_live = models.BooleanField(default=True, help_text="If this is not checked, the page will only be visible to logged-in users.")
-    
+    is_live = models.BooleanField(
+        default=getattr(settings, 'IS_LIVE_DEFAULT', True),
+        help_text="If this is not checked, the page will only "
+                  "be visible to logged-in users.")
+
     objects = PageManager()
-    live = LivePageManager()
-    
+
     class Meta:
         ordering = ('url',)
-        unique_together = ('url', 'site')
-    
-    history = AuditTrail(show_in_admin=False)
-    
+
     def get_children(self, qs=None):
         return get_child_pages(self.url, qs)
-
-    def __unicode__(self):
-        return self.url
 
     def get_absolute_url(self):
         return self.url
 
-    def page_title(self):
-        return self.get_title()
+    def __str__(self):
+        block = self.get_blocks().exclude(content='').filter(label='title') \
+                    .first()
+        return block.content if block else ('Page: %s' % self.url)
 
 
-def page_pre(sender, **kwargs):
-    if not kwargs['instance'].site:
-        kwargs['instance'].site = Site.objects.all()[0]
-pre_save.connect(page_pre, sender=Page)
+@python_2_unicode_compatible
+class PageSite(models.Model):
+    page = models.ForeignKey(Page, related_name='sites',
+                             on_delete=models.CASCADE)
+    site_id = models.PositiveIntegerField()
 
+    @property
+    def site(self):
+        return Site.objects.get(pk=self.site_id)
 
-
-class MenuItem(models.Model):
-    page = models.OneToOneField(Page)
-    text = models.CharField(max_length=255, blank=True, default="", help_text="If left blank, will use page title")
-    title = models.CharField(max_length=255, blank=True, default="")
-    sort = models.IntegerField(blank=True, default=0)
-    
     class Meta:
-        ordering = ('sort','id',)
-    
-    def get_text(self):
-        return self.text or self.page.page_title()
-    
-    def __unicode__(self):
-        return self.get_text()
-    
+        unique_together = ('page', 'site_id')
+
+    def clean(self):
+        others = PageSite.objects.exclude(pk=self.pk)
+        if others.filter(site_id=self.site_id, page__url=self.page.url):
+            raise ValidationError(u'Page url and site_id must be unique.')
+
+    def __str__(self):
+        return str(self.site)
 
 
-
-
-
-
-"""
-Abstract model for other apps that want to have related Blocks and Images
-"""
 class CMSBaseModel(_CMSAbstractBaseModel):
+    """Abstract model for other apps that want to have related Blocks and
+       Images"""
 
-    
-    BLOCK_LABELS = [] # list of tuples of the form ('name', 'format',), but will fall back if it's just a list of strings
-    IMAGE_LABELS = [] # list of strings
-    
-    
-    def __unicode__(self):
-        return self.get_title()
-    
-    def _block_LABEL(self, label):
-        return self.blocks.get(label=label).compiled_content
-    
-    
-    
+    # list of tuples of the form ('name', 'format',), but will fall back if
+    # it's just a list of strings
+    BLOCK_LABELS = []
+    IMAGE_LABELS = []  # list of strings
+
     class Meta:
         abstract = True
 
-# add extra blocks on save (dummy rendering happens too since CMSBaseModel extends _CMSAbstractBaseModel)
+
 def add_blocks(sender, **kwargs):
+    """add extra blocks on save (dummy rendering happens too since CMSBaseModel
+       extends _CMSAbstractBaseModel). """
+
     if isinstance(kwargs['instance'], CMSBaseModel):
+        ctype = ContentType.objects.get_for_model(kwargs['instance'])
         for label_tuple in kwargs['instance'].BLOCK_LABELS:
             if isinstance(label_tuple, str):
                 label_tuple = (label_tuple, None,)
             block, created = Block.objects.get_or_create(
                 label=label_tuple[0],
-                content_type=ContentType.objects.get_for_model(kwargs['instance']),
+                content_type=ctype,
                 object_id=kwargs['instance'].id
             )
-            # only set the format if the block was just created, or it's blank, and if a format is defined
+            # only set the format if the block was just created, or it's blank,
+            # and if a format is defined
             if (not block.format or created) and label_tuple[1]:
                 block.format = label_tuple[1]
                 block.save()
-            
+
         for label in kwargs['instance'].IMAGE_LABELS:
             Image.objects.get_or_create(
                 label=label,
-                content_type=ContentType.objects.get_for_model(kwargs['instance']),
+                content_type=ctype,
                 object_id=kwargs['instance'].id
             )
 post_save.connect(add_blocks)
-
-
-"""
-Possible todo: If the base model has a field named _block_LABEL, 
-save the block's value there as well via post_save?
-"""
-
-
-# Set up the accessor method for block content
-def add_methods(sender, **kwargs):
-    if issubclass(sender, CMSBaseModel):
-        for label_tuple in sender.BLOCK_LABELS:
-            setattr(sender, 'block_%s' % label_tuple[0],
-                curry(sender._block_LABEL, label=label_tuple[0]))
-
-# connect the add_accessor_methods function to the post_init signal
-class_prepared.connect(add_methods)
-

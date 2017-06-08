@@ -1,0 +1,13 @@
+<span class='cms-image {% if not image.image.file %}placeholder{% endif %}'
+      data-save_url='{% url 'cms_saveimage' image.image.id %}'
+      data-description="{{ image.image.description }}"
+      data-image_url="{% if image.url %}{{ image.url }}{% endif %}">
+  
+  <span class="cms-inner">
+    {% if rendered_content.strip %}
+      {{ rendered_content }}
+    {% else %}
+      Click to add image
+    {% endif %}
+  </span>
+</span>
